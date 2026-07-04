@@ -7,9 +7,9 @@
  *
  * Init order (important):
  *   1. VEML7700  (installs new I2C driver on I2C_NUM_1)
- *   2. Camera    (uses its own SCCB on I2C_NUM_0, GPIO 26/27)
- *   3. Wi-Fi     (BLE provisioning via wifi_prov_init, blocks until IP)
- *   4. OTA       (camera deinit → flash write → camera reinit, avoids DMA conflict)
+ *   2. Wi-Fi     (BLE provisioning via wifi_prov_init, blocks until IP)
+ *   3. OTA       (checks GitHub for new firmware on every boot)
+ *   4. Camera    (after WiFi — RF oscillator must be stable for XCLK)
  *   5. SNTP      (waits for time sync via TIME_SYNCED_BIT, callback-driven)
  *   6. MQTT      (waits for CONNACK via MQTT_CONNECTED_BIT)
  */
@@ -327,15 +327,13 @@ void app_main(void)
     /* ─── 1. VEML7700 (installs I2C driver on NUM_1) ─── */
     ESP_ERROR_CHECK(veml7700_init(s_i2c_mutex));
 
-    /* ─── 2. Camera ─── */
-    ESP_ERROR_CHECK(camera_init());
-
-    /* ─── 3. Wi-Fi — BLE provisioning (blocks until IP obtained) ─── */
+    /* ─── 2. Wi-Fi — BLE provisioning (blocks until IP obtained) ─── */
     wifi_prov_init();
 
-    /* ─── 4. OTA — deinit camera first to prevent DMA conflict during flash write ─── */
-    esp_camera_deinit();
+    /* ─── 3. OTA check ─── */
     ota_check_and_update();
+
+    /* ─── 4. Camera — after WiFi init so RF oscillator is stable for XCLK ─── */
     ESP_ERROR_CHECK(camera_init());
 
     /* ─── 5. SNTP (blocks until first sync or timeout) ─── */

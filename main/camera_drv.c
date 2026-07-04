@@ -4,6 +4,9 @@
  */
 #include "camera_drv.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "CAM";
 
@@ -59,7 +62,21 @@ esp_err_t camera_init(void)
         .sccb_i2c_port = 0,               /* 명시적으로 I2C_NUM_0 사용 (I2C_NUM_1은 VEML7700 점유) */
     };
 
-    esp_err_t ret = esp_camera_init(&cfg);
+    /* Power-cycle OV2640 via PWDN before init */
+    gpio_set_direction(CAM_PIN_PWDN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CAM_PIN_PWDN, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    gpio_set_level(CAM_PIN_PWDN, 0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    esp_err_t ret = ESP_FAIL;
+    for (int i = 0; i < 3; i++) {
+        ret = esp_camera_init(&cfg);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "Camera init attempt %d failed (0x%x), retrying...", i + 1, ret);
+        esp_camera_deinit();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: 0x%x", ret);
         return ret;
