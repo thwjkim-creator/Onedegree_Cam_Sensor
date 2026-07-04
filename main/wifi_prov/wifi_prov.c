@@ -74,7 +74,7 @@ void wifi_prov_init(void)
     ESP_ERROR_CHECK(wifi_prov_mgr_init(prov_cfg));
 
     // 6. 프로비저닝 여부 확인
-    // wifi_prov_mgr_reset_provisioning();  /* WiFi 변경 시: 주석 해제 → 플래시 → 앱 재프로비저닝 → 다시 주석 */
+    wifi_prov_mgr_reset_provisioning();
     bool provisioned = false;
     ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
 

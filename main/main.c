@@ -1,15 +1,15 @@
 /**
  * @file main.c
- * @brief ESP32-CAM + VEML7700 — capture JPEG & lux, send via HTTP/MQTT
+ * @brief ESP32-CAM + VEML7700 — capture JPEG & lux, send via HTTPS/MQTT
  *
  * Tasks:
- *   sensor_camera_task — 5 min period, lux → MQTT JSON, JPEG → HTTP POST
+ *   sensor_camera_task — 15 s period, lux → MQTT JSON, JPEG → HTTPS POST
  *
  * Init order (important):
  *   1. VEML7700  (installs new I2C driver on I2C_NUM_1)
  *   2. Camera    (uses its own SCCB on I2C_NUM_0, GPIO 26/27)
  *   3. Wi-Fi     (BLE provisioning via wifi_prov_init, blocks until IP)
- *   4. OTA       (checks GitHub for new firmware on every boot)
+ *   4. OTA       (camera deinit → flash write → camera reinit, avoids DMA conflict)
  *   5. SNTP      (waits for time sync via TIME_SYNCED_BIT, callback-driven)
  *   6. MQTT      (waits for CONNACK via MQTT_CONNECTED_BIT)
  */
@@ -45,15 +45,13 @@
  *  Configuration — edit these for your environment
  * ═══════════════════════════════════════════════════════════ */
 
-// #define HTTP_POST_URL          "http://humble-correctly-monarch.ngrok-free.app"
-#define HTTP_POST_URL          "http://ec2-user@ec2-100-54-40-70.compute-1.amazonaws.com"
-// #define MQTT_BROKER_URI        "mqtt://broker.hivemq.com:1883"
-#define MQTT_BROKER_URI          "mqtt://ec2-user@ec2-100-54-40-70.compute-1.amazonaws.com"
+#define HTTP_POST_URL          "http://ec2-100-54-40-70.compute-1.amazonaws.com:8282"
+#define MQTT_BROKER_URI        "mqtt://ec2-100-54-40-70.compute-1.amazonaws.com:1883"
 #define MQTT_TOPIC_BASE        "onedegree/sensor/veml7700/device"
 #define MQTT_LWT_MSG           "{\"status\":\"offline\"}"
 #define MQTT_ONLINE_MSG        "{\"status\":\"online\"}"
 
-#define TASK_PERIOD_MS         300000   /* 카메라 + 센서 공통 주기 (5분) */
+#define TASK_PERIOD_MS         15000   /* 15초 */
 
 #define SNTP_SYNC_TIMEOUT_MS   30000   /* 30 s — SNTP 동기화 대기 */
 
@@ -264,26 +262,30 @@ static void sensor_camera_task(void *arg)
 
         ESP_LOGI(TAG, "JPEG captured: %u bytes  ts=%s", (unsigned)fb->len, ts);
 
+        /* HTTP POST */
         esp_http_client_config_t http_cfg = {
-            .url    = HTTP_POST_URL,
-            .method = HTTP_METHOD_POST,
-            .timeout_ms = 15000,
+            .url               = HTTP_POST_URL,
+            .method            = HTTP_METHOD_POST,
+            .timeout_ms        = 15000,
             .crt_bundle_attach = NULL,
             .skip_cert_common_name_check = true,
             .use_global_ca_store = false,
         };
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_http_client_set_header(client, "Host", "humble-correctly-monarch.ngrok-free.app");
-        esp_http_client_set_header(client, "User-Agent", "ESP32-CAM/1.0");
+        esp_http_client_set_header(client, "User-Agent",   "ESP32-CAM/1.0");
         esp_http_client_set_header(client, "Content-Type", "image/jpeg");
-        esp_http_client_set_header(client, "X-Timestamp", ts);
-        esp_http_client_set_header(client, "X-Sensor-No", s_sensor_no);
-        esp_http_client_set_post_field(client, (const char *)fb->buf, (int)fb->len);
-
-        esp_err_t err = esp_http_client_perform(client);
+        esp_http_client_set_header(client, "X-Timestamp",  ts);
+        esp_http_client_set_header(client, "X-Sensor-No",  s_sensor_no);
+        esp_err_t err = esp_http_client_open(client, (int)fb->len);
         if (err == ESP_OK) {
-            int status = esp_http_client_get_status_code(client);
-            ESP_LOGI(TAG, "HTTP POST → %d", status);
+            int written = esp_http_client_write(client, (const char *)fb->buf, (int)fb->len);
+            if (written < 0) {
+                ESP_LOGE(TAG, "HTTP write failed");
+            } else {
+                esp_http_client_fetch_headers(client);
+                int status = esp_http_client_get_status_code(client);
+                ESP_LOGI(TAG, "HTTP POST → %d", status);
+            }
         } else {
             ESP_LOGE(TAG, "HTTP POST failed: %s", esp_err_to_name(err));
         }
@@ -322,17 +324,19 @@ void app_main(void)
     /* ─── 0. Read MAC address (sensor identifier) ─── */
     sensor_no_init();
 
-    /* ─── 1. VEML7700 first (installs I2C driver on NUM_1) ─── */
-    // ESP_ERROR_CHECK(veml7700_init(s_i2c_mutex));
+    /* ─── 1. VEML7700 (installs I2C driver on NUM_1) ─── */
+    ESP_ERROR_CHECK(veml7700_init(s_i2c_mutex));
 
-    /* ─── 2. Camera second ─── */
-    // ESP_ERROR_CHECK(camera_init());
+    /* ─── 2. Camera ─── */
+    ESP_ERROR_CHECK(camera_init());
 
     /* ─── 3. Wi-Fi — BLE provisioning (blocks until IP obtained) ─── */
     wifi_prov_init();
 
-    /* ─── 4. OTA check — reboots if newer firmware found ─── */
+    /* ─── 4. OTA — deinit camera first to prevent DMA conflict during flash write ─── */
+    esp_camera_deinit();
     ota_check_and_update();
+    ESP_ERROR_CHECK(camera_init());
 
     /* ─── 5. SNTP (blocks until first sync or timeout) ─── */
     sntp_init_time();

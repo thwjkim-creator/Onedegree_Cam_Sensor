@@ -32,7 +32,7 @@ static const char *TAG = "VEML7700";
 /* SDA/SCL for SEN0228 — uses I2C_NUM_1 to avoid camera conflict */
 #define I2C_SDA_PIN            14
 #define I2C_SCL_PIN            15
-#define I2C_FREQ_HZ            100000   /* 100 kHz – safe for VEML7700 */
+#define I2C_FREQ_HZ            50000    /* 50 kHz – reduced for signal integrity */
 
 /* ── Gain / Integration-time tables ── */
 typedef struct {
@@ -163,6 +163,9 @@ esp_err_t veml7700_init(SemaphoreHandle_t i2c_mutex)
         ESP_LOGE(TAG, "I2C device add failed: 0x%x", ret);
         return ret;
     }
+
+    /* VEML7700 power-on settling time */
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     /* Power on with default gain/IT */
     ret = apply_conf();
