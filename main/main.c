@@ -3,7 +3,8 @@
  * @brief ESP32-CAM + VEML7700 — capture JPEG & lux, send via HTTPS/MQTT
  *
  * Tasks:
- *   sensor_camera_task — 15 s period, lux → MQTT JSON, JPEG → HTTPS POST
+ *   lux_task    — 30 s period, lux → MQTT JSON
+ *   camera_task — 5 min period, JPEG → HTTPS POST
  *
  * Init order (important):
  *   1. VEML7700  (installs new I2C driver on I2C_NUM_1)
@@ -51,7 +52,8 @@
 #define MQTT_LWT_MSG           "{\"status\":\"offline\"}"
 #define MQTT_ONLINE_MSG        "{\"status\":\"online\"}"
 
-#define TASK_PERIOD_MS         15000   /* 15초 */
+#define LUX_PERIOD_MS          30000   /* 30초 */
+#define CAMERA_PERIOD_MS       300000  /* 5분 */
 
 #define SNTP_SYNC_TIMEOUT_MS   30000   /* 30 s — SNTP 동기화 대기 */
 
@@ -203,9 +205,9 @@ static bool is_time_valid(void)
     return now >= MIN_VALID_EPOCH;
 }
 
-/* ────────────────── Unified sensor + camera task ────────── */
+/* ────────────────── Lux task ─────────────────────────────── */
 
-static void sensor_camera_task(void *arg)
+static void lux_task(void *arg)
 {
     char ts[40];
     char payload[128];
@@ -214,7 +216,7 @@ static void sensor_camera_task(void *arg)
     while (1) {
 
         if (!first_run) {
-            vTaskDelay(pdMS_TO_TICKS(TASK_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(LUX_PERIOD_MS));
         }
         first_run = false;
 
@@ -245,6 +247,29 @@ static void sensor_camera_task(void *arg)
         } else {
             ESP_LOGW(TAG, "Lux read failed: %s", esp_err_to_name(ret));
         }
+    }
+}
+
+/* ────────────────── Camera task ──────────────────────────── */
+
+static void camera_task(void *arg)
+{
+    char ts[40];
+    bool first_run = true;
+
+    while (1) {
+
+        if (!first_run) {
+            vTaskDelay(pdMS_TO_TICKS(CAMERA_PERIOD_MS));
+        }
+        first_run = false;
+
+        if (!is_time_valid()) {
+            ESP_LOGW(TAG, "Time not yet synced — skipping this cycle");
+            continue;
+        }
+
+        get_kst_timestamp(ts, sizeof(ts));
 
         /* ── 카메라 촬영 ── */
         if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
@@ -343,8 +368,10 @@ void app_main(void)
     mqtt_init();
     wait_for_mqtt();
 
-    /* ─── 7. Launch unified task ─── */
-    xTaskCreatePinnedToCore(sensor_camera_task, "sensor_camera_task",
+    /* ─── 7. Launch tasks ─── */
+    xTaskCreatePinnedToCore(lux_task, "lux_task",
+                            8192, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(camera_task, "camera_task",
                             8192, NULL, 5, NULL, 0);
 
     ESP_LOGI(TAG, "Task launched ✓");
